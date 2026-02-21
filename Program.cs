@@ -1,3 +1,5 @@
+using Dashboard.Api.Services;
+using Dashboard.Api.Models;
 using MySqlConnector;
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +19,9 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddHttpClient<HomeAssistantService>();
+
+
 
 var app = builder.Build();
 app.UseCors("DashboardCors");
@@ -140,6 +145,35 @@ app.MapGet("/api/elpris/today", async () =>
     var json = await response.Content.ReadAsStringAsync();
     return Results.Content(json, "application/json");
 });
+
+app.MapPost("/api/lights/command", async (
+    LightCommand command,
+    HomeAssistantService haService) =>
+{
+    Console.WriteLine(
+        $"[LIGHT CMD] Toggle lamp: {command.LampId}"
+    );
+
+    await haService.ToggleLightAsync(command.LampId);
+
+    return Results.Ok(new
+    {
+        success = true,
+        lampId = command.LampId,
+        toggledAt = DateTime.UtcNow
+    });
+})
+.WithTags("Lights");
+
+app.MapGet("/api/lights/status", async (HomeAssistantService haService) =>
+{
+    var lights = await haService.GetAllLightsAsync();
+
+    return Results.Ok(lights);
+})
+.WithTags("Lights");
+
+
 
 
 app.Run();
