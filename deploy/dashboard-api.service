@@ -1,0 +1,16 @@
+[Unit]
+Description=Dashboard API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dashboard-api
+ExecStart=/usr/bin/dotnet /opt/dashboard-api/Dashboard.Api.dll
+EnvironmentFile=/etc/dashboard-api/dashboard-api.env
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

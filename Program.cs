@@ -1,17 +1,18 @@
 using Dashboard.Api.Services;
 using Dashboard.Api.Models;
 using MySqlConnector;
+
 var builder = WebApplication.CreateBuilder(args);
+var allowedOrigins =
+    builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+    ?? ["http://localhost:5173", "http://localhost:3000"];
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("DashboardCors", policy =>
     {
         policy
-            .WithOrigins(
-                "http://localhost:5173",   // Vite / dev
-                "http://localhost:3000"    // ev annan dev
-            )
+            .WithOrigins(allowedOrigins)
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -20,16 +21,8 @@ builder.Services.AddCors(options =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpClient<HomeAssistantService>();
-
-
-
 var app = builder.Build();
 app.UseCors("DashboardCors");
-
-
-
-
-var connectionString = builder.Configuration.GetConnectionString("DashboardDb");
 
 if (app.Environment.IsDevelopment())
 {
@@ -56,9 +49,15 @@ app.MapGet("/api/dashboard/overview", () =>
     };
 });
 
-app.MapGet("/api/db/ping", async (IConfiguration config) =>
+app.MapGet("/api/db/ping", async Task<IResult> (IConfiguration config) =>
 {
     var cs = config.GetConnectionString("DashboardDb");
+    if (string.IsNullOrWhiteSpace(cs))
+    {
+        return Results.Problem(
+            detail: "ConnectionStrings:DashboardDb is not configured.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 
     await using var conn = new MySqlConnection(cs);
     await conn.OpenAsync();
@@ -66,12 +65,12 @@ app.MapGet("/api/db/ping", async (IConfiguration config) =>
     await using var cmd = new MySqlCommand("SELECT 1", conn);
     var result = await cmd.ExecuteScalarAsync();
 
-    return new
+    return Results.Ok(new
     {
         database = "MariaDB",
         result,
         time = DateTime.UtcNow
-    };
+    });
 });
 
 app.MapGet("/api/dashboard/summary", () =>
@@ -89,9 +88,15 @@ app.MapGet("/api/dashboard/summary", () =>
     };
 });
 
-app.MapGet("/api/dashboard/summary-db", async (IConfiguration config) =>
+app.MapGet("/api/dashboard/summary-db", async Task<IResult> (IConfiguration config) =>
 {
     var cs = config.GetConnectionString("DashboardDb");
+    if (string.IsNullOrWhiteSpace(cs))
+    {
+        return Results.Problem(
+            detail: "ConnectionStrings:DashboardDb is not configured.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 
     await using var conn = new MySqlConnection(cs);
     await conn.OpenAsync();
