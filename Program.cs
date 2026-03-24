@@ -21,6 +21,15 @@ builder.Services.AddCors(options =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpClient<HomeAssistantService>();
+builder.Services.AddHttpClient<CalendarDayInfoClient>();
+builder.Services.AddHttpClient<SchoolMenuClient>();
+builder.Services.AddHttpClient<WeatherForecastClient>();
+builder.Services.AddSingleton<CalendarDayInfoParser>();
+builder.Services.AddSingleton<SchoolMenuParser>();
+builder.Services.AddSingleton<WeatherForecastParser>();
+builder.Services.AddScoped<CalendarDayInfoService>();
+builder.Services.AddScoped<SchoolMenuService>();
+builder.Services.AddScoped<WeatherForecastService>();
 var app = builder.Build();
 app.UseCors("DashboardCors");
 
@@ -37,6 +46,14 @@ app.MapGet("/api/status", () => new
     name = "Dashboard.Api",
     status = "ok",
     time = DateTime.UtcNow
+});
+
+app.MapGet("/api/calendar/today", async Task<IResult> (
+    CalendarDayInfoService calendarDayInfoService,
+    CancellationToken cancellationToken) =>
+{
+    var info = await calendarDayInfoService.GetTodayInfoAsync(cancellationToken);
+    return Results.Ok(info);
 });
 
 app.MapGet("/api/dashboard/overview", () =>
@@ -125,6 +142,24 @@ app.MapGet("/api/dashboard/summary-db", async Task<IResult> (IConfiguration conf
 });
 
 //Hämta Elpris
+app.MapGet("/api/school/menu", async Task<IResult> (
+    SchoolMenuService schoolMenuService,
+    CancellationToken cancellationToken) =>
+{
+    var menu = await schoolMenuService.GetWeeklyMenuAsync(cancellationToken);
+    return Results.Ok(menu);
+});
+
+app.MapGet("/api/weather/forecast", async Task<IResult> (
+    double lat,
+    double lon,
+    WeatherForecastService weatherForecastService,
+    CancellationToken cancellationToken) =>
+{
+    var forecast = await weatherForecastService.GetForecastAsync(lat, lon, cancellationToken);
+    return Results.Ok(forecast);
+});
+
 app.MapGet("/api/elpris/today", async () =>
 {
        // 1. Dagens datum (lokal tid)
