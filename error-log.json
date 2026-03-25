@@ -1,0 +1,62 @@
+[
+  {
+    "timestampUtc": "2026-03-25T01:05:24.9617068Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707318690508700\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:05:28.6404048Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707318690508700\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:10:59.9078676Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707310731101536\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:11:04.324409Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707318690508700\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:11:13.6272435Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707310731101536\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:11:17.3348356Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002708410076472588\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:11:48.2576843Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002708410076472588\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:12:42.742308Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002708410076472588\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:15:02.0526238Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707310731101536\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  },
+  {
+    "timestampUtc": "2026-03-25T01:17:24.3096136Z",
+    "path": "/api/cellar/scan",
+    "error": "Duplicate entry \u002707310731101536\u0027 for key \u0027ux_cellar_barcode\u0027",
+    "hint": "Database operation failed."
+  }
+]
