@@ -215,7 +215,7 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
     CancellationToken cancellationToken) =>
 {
     var ean = request.Ean?.Trim();
-    if (string.IsNullOrWhiteSpace(ean))
+    if (!TryNormalizeBarcode(request.Ean, out var normalizedBarcode))
     {
         return Results.BadRequest(new { message = "EAN-kod saknas eller ar ogiltig." });
     }
@@ -235,7 +235,7 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
     await conn.OpenAsync(cancellationToken);
     await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
-    var existingItem = await GetCellarItemByEanAsync(conn, tx, ean, cancellationToken);
+    var existingItem = await GetCellarItemByBarcodeAsync(conn, tx, normalizedBarcode, cancellationToken);
 
     if (!isAddMode)
     {
@@ -246,7 +246,7 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
 
         var newQuantity = Math.Max(existingItem.Quantity - 1, 0);
 
-        await UpdateCellarQuantityAsync(conn, tx, ean, newQuantity, cancellationToken);
+        await UpdateCellarQuantityAsync(conn, tx, existingItem.Ean, newQuantity, cancellationToken);
         await tx.CommitAsync(cancellationToken);
 
         var updatedItem = existingItem with { Quantity = newQuantity };
@@ -261,7 +261,7 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
     if (existingItem is not null)
     {
         var increasedItem = existingItem with { Quantity = existingItem.Quantity + 1 };
-        await UpdateCellarQuantityAsync(conn, tx, ean, increasedItem.Quantity, cancellationToken);
+        await UpdateCellarQuantityAsync(conn, tx, existingItem.Ean, increasedItem.Quantity, cancellationToken);
         await tx.CommitAsync(cancellationToken);
 
         var itemsAfterAdd = await GetAllCellarItemsAsync(cs, cancellationToken);
@@ -272,15 +272,31 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
         });
     }
 
-    var lookedUpProduct = await productLookupService.LookupByEanAsync(ean, cancellationToken);
+    var lookedUpProduct = await productLookupService.LookupByEanAsync(normalizedBarcode, cancellationToken);
     if (lookedUpProduct is null)
     {
         return Results.NotFound(new { message = "Ingen produkt hittades for den skannade EAN-koden." });
     }
 
+    var lookedUpBarcode = NormalizeBarcode(lookedUpProduct.Ean);
+    var existingAfterLookup = await GetCellarItemByBarcodeAsync(conn, tx, lookedUpBarcode, cancellationToken);
+    if (existingAfterLookup is not null)
+    {
+        var increasedExistingItem = existingAfterLookup with { Quantity = existingAfterLookup.Quantity + 1 };
+        await UpdateCellarQuantityAsync(conn, tx, existingAfterLookup.Ean, increasedExistingItem.Quantity, cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
+        var itemsAfterLookupMatch = await GetAllCellarItemsAsync(cs, cancellationToken);
+        return Results.Ok(new CellarScanResponse
+        {
+            Item = increasedExistingItem,
+            Items = itemsAfterLookupMatch
+        });
+    }
+
     var newItem = new CellarInventoryItem
     {
-        Ean = lookedUpProduct.Ean,
+        Ean = lookedUpBarcode,
         Brand = lookedUpProduct.Brand,
         ProductName = lookedUpProduct.ProductName,
         ImageUrl = lookedUpProduct.ImageUrl,
@@ -400,21 +416,23 @@ static async Task<List<CellarInventoryItem>> GetAllCellarItemsAsync(string conne
     return items;
 }
 
-static async Task<CellarInventoryItem?> GetCellarItemByEanAsync(
+static async Task<CellarInventoryItem?> GetCellarItemByBarcodeAsync(
     MySqlConnection conn,
     MySqlTransaction transaction,
-    string ean,
+    string barcode,
     CancellationToken cancellationToken)
 {
+    var alternateBarcode = GetAlternateBarcode(barcode);
     const string sql = """
         SELECT Barcode, ImageUrl, Name, Brand, Quantity
         FROM cellar
-        WHERE Barcode = @ean
+        WHERE Barcode = @barcode OR Barcode = @alternateBarcode
         LIMIT 1
     """;
 
     await using var cmd = new MySqlCommand(sql, conn, transaction);
-    cmd.Parameters.AddWithValue("@ean", ean);
+    cmd.Parameters.AddWithValue("@barcode", barcode);
+    cmd.Parameters.AddWithValue("@alternateBarcode", alternateBarcode);
 
     await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
     if (!await reader.ReadAsync(cancellationToken))
@@ -432,6 +450,35 @@ static async Task<CellarInventoryItem?> GetCellarItemByEanAsync(
         Quantity = reader.GetInt32("Quantity")
     };
 }
+
+static bool TryNormalizeBarcode(string? value, out string normalizedBarcode)
+{
+    normalizedBarcode = string.Empty;
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return false;
+    }
+
+    var digitsOnly = new string(value.Where(char.IsDigit).ToArray());
+    if (digitsOnly.Length is not 13 and not 14)
+    {
+        return false;
+    }
+
+    normalizedBarcode = NormalizeBarcode(digitsOnly);
+    return true;
+}
+
+static string NormalizeBarcode(string barcode)
+{
+    var digitsOnly = new string(barcode.Where(char.IsDigit).ToArray());
+    return digitsOnly.Length == 13 ? $"0{digitsOnly}" : digitsOnly;
+}
+
+static string GetAlternateBarcode(string barcode) =>
+    barcode.Length == 14 && barcode.StartsWith('0')
+        ? barcode[1..]
+        : barcode;
 
 static async Task InsertCellarItemAsync(
     MySqlConnection conn,
