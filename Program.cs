@@ -34,6 +34,8 @@ builder.Services.AddScoped<SchoolMenuService>();
 builder.Services.AddScoped<WeatherForecastService>();
 var app = builder.Build();
 
+await EnsureCellarSchemaAsync(app.Configuration);
+
 app.Use(async (context, next) =>
 {
     try
@@ -179,7 +181,7 @@ app.MapGet("/api/cellar/items", async Task<IResult> (IConfiguration config, Canc
     await conn.OpenAsync(cancellationToken);
 
     const string sql = """
-        SELECT Barcode, ImageUrl, Name, Brand, Quantity
+        SELECT Barcode, ImageUrl, Name, Brand, Quantity, RestockLevel
         FROM cellar
         ORDER BY Name, Brand, id
     """;
@@ -189,6 +191,7 @@ app.MapGet("/api/cellar/items", async Task<IResult> (IConfiguration config, Canc
 
     var items = new List<CellarInventoryItem>();
     var imageUrlOrdinal = reader.GetOrdinal("ImageUrl");
+    var restockLevelOrdinal = reader.GetOrdinal("RestockLevel");
     while (await reader.ReadAsync(cancellationToken))
     {
         items.Add(new CellarInventoryItem
@@ -197,7 +200,8 @@ app.MapGet("/api/cellar/items", async Task<IResult> (IConfiguration config, Canc
             ImageUrl = reader.IsDBNull(imageUrlOrdinal) ? null : reader.GetString("ImageUrl"),
             ProductName = reader.GetString("Name"),
             Brand = reader.GetString("Brand"),
-            Quantity = reader.GetInt32("Quantity")
+            Quantity = reader.GetInt32("Quantity"),
+            RestockLevel = reader.IsDBNull(restockLevelOrdinal) ? 1 : reader.GetInt32("RestockLevel")
         });
     }
 
@@ -300,7 +304,8 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
         Brand = lookedUpProduct.Brand,
         ProductName = lookedUpProduct.ProductName,
         ImageUrl = lookedUpProduct.ImageUrl,
-        Quantity = 1
+        Quantity = 1,
+        RestockLevel = 1
     };
 
     await InsertCellarItemAsync(conn, tx, newItem, cancellationToken);
@@ -311,6 +316,58 @@ app.MapPost("/api/cellar/scan", async Task<IResult> (
     {
         Item = newItem,
         Items = itemsAfterInsert
+    });
+})
+.WithTags("Cellar");
+
+app.MapPatch("/api/cellar/items/{ean}", async Task<IResult> (
+    string ean,
+    UpdateCellarItemRequest request,
+    IConfiguration config,
+    CancellationToken cancellationToken) =>
+{
+    if (!TryNormalizeBarcode(ean, out var normalizedBarcode))
+    {
+        return Results.BadRequest(new { message = "EAN-kod saknas eller ar ogiltig." });
+    }
+
+    if (request.Quantity < 0 || request.RestockLevel < 0)
+    {
+        return Results.BadRequest(new { message = "Quantity och restockLevel maste vara 0 eller hogre." });
+    }
+
+    var cs = config.GetConnectionString("DashboardDb");
+    if (string.IsNullOrWhiteSpace(cs))
+    {
+        return Results.Problem(
+            detail: "ConnectionStrings:DashboardDb is not configured.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    await using var conn = new MySqlConnection(cs);
+    await conn.OpenAsync(cancellationToken);
+    await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+    var existingItem = await GetCellarItemByBarcodeAsync(conn, tx, normalizedBarcode, cancellationToken);
+    if (existingItem is null)
+    {
+        return Results.NotFound(new { message = "Produkten finns inte i inventariet." });
+    }
+
+    var updatedItem = existingItem with
+    {
+        Quantity = request.Quantity,
+        RestockLevel = request.RestockLevel
+    };
+
+    await UpdateCellarItemAsync(conn, tx, existingItem.Ean, request.Quantity, request.RestockLevel, cancellationToken);
+    await tx.CommitAsync(cancellationToken);
+
+    var itemsAfterUpdate = await GetAllCellarItemsAsync(cs, cancellationToken);
+    return Results.Ok(new CellarScanResponse
+    {
+        Item = updatedItem,
+        Items = itemsAfterUpdate
     });
 })
 .WithTags("Cellar");
@@ -391,7 +448,7 @@ static async Task<List<CellarInventoryItem>> GetAllCellarItemsAsync(string conne
     await conn.OpenAsync(cancellationToken);
 
     const string sql = """
-        SELECT Barcode, ImageUrl, Name, Brand, Quantity
+        SELECT Barcode, ImageUrl, Name, Brand, Quantity, RestockLevel
         FROM cellar
         ORDER BY Name, Brand, id
     """;
@@ -401,6 +458,7 @@ static async Task<List<CellarInventoryItem>> GetAllCellarItemsAsync(string conne
 
     var items = new List<CellarInventoryItem>();
     var imageUrlOrdinal = reader.GetOrdinal("ImageUrl");
+    var restockLevelOrdinal = reader.GetOrdinal("RestockLevel");
     while (await reader.ReadAsync(cancellationToken))
     {
         items.Add(new CellarInventoryItem
@@ -409,7 +467,8 @@ static async Task<List<CellarInventoryItem>> GetAllCellarItemsAsync(string conne
             ImageUrl = reader.IsDBNull(imageUrlOrdinal) ? null : reader.GetString("ImageUrl"),
             ProductName = reader.GetString("Name"),
             Brand = reader.GetString("Brand"),
-            Quantity = reader.GetInt32("Quantity")
+            Quantity = reader.GetInt32("Quantity"),
+            RestockLevel = reader.IsDBNull(restockLevelOrdinal) ? 1 : reader.GetInt32("RestockLevel")
         });
     }
 
@@ -424,7 +483,7 @@ static async Task<CellarInventoryItem?> GetCellarItemByBarcodeAsync(
 {
     var alternateBarcode = GetAlternateBarcode(barcode);
     const string sql = """
-        SELECT Barcode, ImageUrl, Name, Brand, Quantity
+        SELECT Barcode, ImageUrl, Name, Brand, Quantity, RestockLevel
         FROM cellar
         WHERE Barcode = @barcode OR Barcode = @alternateBarcode
         LIMIT 1
@@ -441,13 +500,15 @@ static async Task<CellarInventoryItem?> GetCellarItemByBarcodeAsync(
     }
 
     var imageUrlOrdinal = reader.GetOrdinal("ImageUrl");
+    var restockLevelOrdinal = reader.GetOrdinal("RestockLevel");
     return new CellarInventoryItem
     {
         Ean = reader.GetString("Barcode"),
         ImageUrl = reader.IsDBNull(imageUrlOrdinal) ? null : reader.GetString("ImageUrl"),
         ProductName = reader.GetString("Name"),
         Brand = reader.GetString("Brand"),
-        Quantity = reader.GetInt32("Quantity")
+        Quantity = reader.GetInt32("Quantity"),
+        RestockLevel = reader.IsDBNull(restockLevelOrdinal) ? 1 : reader.GetInt32("RestockLevel")
     };
 }
 
@@ -487,8 +548,8 @@ static async Task InsertCellarItemAsync(
     CancellationToken cancellationToken)
 {
     const string sql = """
-        INSERT INTO cellar (Barcode, ImageUrl, Name, Brand, Quantity)
-        VALUES (@ean, @imageUrl, @name, @brand, @quantity)
+        INSERT INTO cellar (Barcode, ImageUrl, Name, Brand, Quantity, RestockLevel)
+        VALUES (@ean, @imageUrl, @name, @brand, @quantity, @restockLevel)
     """;
 
     await using var cmd = new MySqlCommand(sql, conn, transaction);
@@ -497,6 +558,7 @@ static async Task InsertCellarItemAsync(
     cmd.Parameters.AddWithValue("@name", item.ProductName);
     cmd.Parameters.AddWithValue("@brand", item.Brand);
     cmd.Parameters.AddWithValue("@quantity", item.Quantity);
+    cmd.Parameters.AddWithValue("@restockLevel", item.RestockLevel);
     await cmd.ExecuteNonQueryAsync(cancellationToken);
 }
 
@@ -517,4 +579,78 @@ static async Task UpdateCellarQuantityAsync(
     cmd.Parameters.AddWithValue("@ean", ean);
     cmd.Parameters.AddWithValue("@quantity", quantity);
     await cmd.ExecuteNonQueryAsync(cancellationToken);
+}
+
+static async Task UpdateCellarItemAsync(
+    MySqlConnection conn,
+    MySqlTransaction transaction,
+    string ean,
+    int quantity,
+    int restockLevel,
+    CancellationToken cancellationToken)
+{
+    const string sql = """
+        UPDATE cellar
+        SET Quantity = @quantity,
+            RestockLevel = @restockLevel
+        WHERE Barcode = @ean
+    """;
+
+    await using var cmd = new MySqlCommand(sql, conn, transaction);
+    cmd.Parameters.AddWithValue("@ean", ean);
+    cmd.Parameters.AddWithValue("@quantity", quantity);
+    cmd.Parameters.AddWithValue("@restockLevel", restockLevel);
+    await cmd.ExecuteNonQueryAsync(cancellationToken);
+}
+
+static async Task EnsureCellarSchemaAsync(IConfiguration configuration)
+{
+    var connectionString = configuration.GetConnectionString("DashboardDb");
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        return;
+    }
+
+    await using var conn = new MySqlConnection(connectionString);
+    await conn.OpenAsync();
+
+    const string hasColumnSql = """
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'cellar'
+          AND COLUMN_NAME = 'RestockLevel'
+    """;
+
+    await using var hasColumnCmd = new MySqlCommand(hasColumnSql, conn);
+    var hasColumn = Convert.ToInt32(await hasColumnCmd.ExecuteScalarAsync()) > 0;
+    if (hasColumn)
+    {
+        const string backfillSql = """
+            UPDATE cellar
+            SET RestockLevel = 1
+            WHERE RestockLevel IS NULL
+        """;
+
+        await using var backfillCmd = new MySqlCommand(backfillSql, conn);
+        await backfillCmd.ExecuteNonQueryAsync();
+        return;
+    }
+
+    const string alterSql = """
+        ALTER TABLE cellar
+        ADD COLUMN RestockLevel INT NULL
+    """;
+
+    await using var alterCmd = new MySqlCommand(alterSql, conn);
+    await alterCmd.ExecuteNonQueryAsync();
+
+    const string initializeSql = """
+        UPDATE cellar
+        SET RestockLevel = 1
+        WHERE RestockLevel IS NULL
+    """;
+
+    await using var initializeCmd = new MySqlCommand(initializeSql, conn);
+    await initializeCmd.ExecuteNonQueryAsync();
 }

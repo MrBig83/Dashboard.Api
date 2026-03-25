@@ -7,4 +7,5 @@ public sealed record CellarInventoryItem
     public string ProductName { get; init; } = string.Empty;
     public string? ImageUrl { get; init; }
     public int Quantity { get; init; }
+    public int? RestockLevel { get; init; }
 }
