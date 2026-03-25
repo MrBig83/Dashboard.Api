@@ -24,13 +24,37 @@ builder.Services.AddHttpClient<HomeAssistantService>();
 builder.Services.AddHttpClient<CalendarDayInfoClient>();
 builder.Services.AddHttpClient<SchoolMenuClient>();
 builder.Services.AddHttpClient<WeatherForecastClient>();
+builder.Services.AddHttpClient<ProductLookupService>();
 builder.Services.AddSingleton<CalendarDayInfoParser>();
 builder.Services.AddSingleton<SchoolMenuParser>();
 builder.Services.AddSingleton<WeatherForecastParser>();
+builder.Services.AddSingleton<JsonErrorLogger>();
 builder.Services.AddScoped<CalendarDayInfoService>();
 builder.Services.AddScoped<SchoolMenuService>();
 builder.Services.AddScoped<WeatherForecastService>();
 var app = builder.Build();
+
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        var logger = context.RequestServices.GetRequiredService<JsonErrorLogger>();
+        await logger.LogAsync(context, ex, context.RequestAborted);
+
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsJsonAsync(new
+        {
+            message = "Ett internt fel uppstod."
+        });
+    }
+});
+
 app.UseCors("DashboardCors");
 
 if (app.Environment.IsDevelopment())
@@ -141,7 +165,141 @@ app.MapGet("/api/dashboard/summary-db", async Task<IResult> (IConfiguration conf
     });
 });
 
-//Hämta Elpris
+app.MapGet("/api/cellar/items", async Task<IResult> (IConfiguration config, CancellationToken cancellationToken) =>
+{
+    var cs = config.GetConnectionString("DashboardDb");
+    if (string.IsNullOrWhiteSpace(cs))
+    {
+        return Results.Problem(
+            detail: "ConnectionStrings:DashboardDb is not configured.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    await using var conn = new MySqlConnection(cs);
+    await conn.OpenAsync(cancellationToken);
+
+    const string sql = """
+        SELECT Barcode, ImageUrl, Name, Brand, Quantity
+        FROM cellar
+        ORDER BY Name, Brand, id
+    """;
+
+    await using var cmd = new MySqlCommand(sql, conn);
+    await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+    var items = new List<CellarInventoryItem>();
+    var imageUrlOrdinal = reader.GetOrdinal("ImageUrl");
+    while (await reader.ReadAsync(cancellationToken))
+    {
+        items.Add(new CellarInventoryItem
+        {
+            Ean = reader.GetString("Barcode"),
+            ImageUrl = reader.IsDBNull(imageUrlOrdinal) ? null : reader.GetString("ImageUrl"),
+            ProductName = reader.GetString("Name"),
+            Brand = reader.GetString("Brand"),
+            Quantity = reader.GetInt32("Quantity")
+        });
+    }
+
+    return Results.Ok(new CellarItemsResponse
+    {
+        Items = items
+    });
+})
+.WithTags("Cellar");
+
+app.MapPost("/api/cellar/scan", async Task<IResult> (
+    CellarScanRequest request,
+    IConfiguration config,
+    ProductLookupService productLookupService,
+    CancellationToken cancellationToken) =>
+{
+    var ean = request.Ean?.Trim();
+    if (string.IsNullOrWhiteSpace(ean))
+    {
+        return Results.BadRequest(new { message = "EAN-kod saknas eller ar ogiltig." });
+    }
+
+    var mode = request.Mode?.Trim();
+    var isAddMode = string.Equals(mode, "add", StringComparison.OrdinalIgnoreCase);
+
+    var cs = config.GetConnectionString("DashboardDb");
+    if (string.IsNullOrWhiteSpace(cs))
+    {
+        return Results.Problem(
+            detail: "ConnectionStrings:DashboardDb is not configured.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    await using var conn = new MySqlConnection(cs);
+    await conn.OpenAsync(cancellationToken);
+    await using var tx = await conn.BeginTransactionAsync(cancellationToken);
+
+    var existingItem = await GetCellarItemByEanAsync(conn, tx, ean, cancellationToken);
+
+    if (!isAddMode)
+    {
+        if (existingItem is null)
+        {
+            return Results.NotFound(new { message = "Produkten finns inte i inventariet." });
+        }
+
+        var newQuantity = Math.Max(existingItem.Quantity - 1, 0);
+
+        await UpdateCellarQuantityAsync(conn, tx, ean, newQuantity, cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
+        var updatedItem = existingItem with { Quantity = newQuantity };
+        var itemsAfterRemove = await GetAllCellarItemsAsync(cs, cancellationToken);
+        return Results.Ok(new CellarScanResponse
+        {
+            Item = updatedItem,
+            Items = itemsAfterRemove
+        });
+    }
+
+    if (existingItem is not null)
+    {
+        var increasedItem = existingItem with { Quantity = existingItem.Quantity + 1 };
+        await UpdateCellarQuantityAsync(conn, tx, ean, increasedItem.Quantity, cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+
+        var itemsAfterAdd = await GetAllCellarItemsAsync(cs, cancellationToken);
+        return Results.Ok(new CellarScanResponse
+        {
+            Item = increasedItem,
+            Items = itemsAfterAdd
+        });
+    }
+
+    var lookedUpProduct = await productLookupService.LookupByEanAsync(ean, cancellationToken);
+    if (lookedUpProduct is null)
+    {
+        return Results.NotFound(new { message = "Ingen produkt hittades for den skannade EAN-koden." });
+    }
+
+    var newItem = new CellarInventoryItem
+    {
+        Ean = lookedUpProduct.Ean,
+        Brand = lookedUpProduct.Brand,
+        ProductName = lookedUpProduct.ProductName,
+        ImageUrl = lookedUpProduct.ImageUrl,
+        Quantity = 1
+    };
+
+    await InsertCellarItemAsync(conn, tx, newItem, cancellationToken);
+    await tx.CommitAsync(cancellationToken);
+
+    var itemsAfterInsert = await GetAllCellarItemsAsync(cs, cancellationToken);
+    return Results.Ok(new CellarScanResponse
+    {
+        Item = newItem,
+        Items = itemsAfterInsert
+    });
+})
+.WithTags("Cellar");
+
+//Hamta Elpris
 app.MapGet("/api/school/menu", async Task<IResult> (
     SchoolMenuService schoolMenuService,
     CancellationToken cancellationToken) =>
@@ -162,14 +320,14 @@ app.MapGet("/api/weather/forecast", async Task<IResult> (
 
 app.MapGet("/api/elpris/today", async () =>
 {
-       // 1. Dagens datum (lokal tid)
+    // 1. Dagens datum (lokal tid)
     var today = DateTime.Today;
 
     // 2. Bygg datumdelar enligt API:ets format
     var year = today.ToString("yyyy");
     var monthDay = today.ToString("MM-dd");
 
-    // 3. Region (hårdkodad nu, kan bli parameter senare)
+    // 3. Region (hardkodad nu, kan bli parameter senare)
     var region = "SE3";
 
     // 4. Bygg URL
@@ -190,10 +348,6 @@ app.MapPost("/api/lights/command", async (
     LightCommand command,
     HomeAssistantService haService) =>
 {
-    Console.WriteLine(
-        $"[LIGHT CMD] Toggle lamp: {command.LampId}"
-    );
-
     await haService.ToggleLightAsync(command.LampId);
 
     return Results.Ok(new
@@ -213,7 +367,107 @@ app.MapGet("/api/lights/status", async (HomeAssistantService haService) =>
 })
 .WithTags("Lights");
 
-
-
-
 app.Run();
+
+static async Task<List<CellarInventoryItem>> GetAllCellarItemsAsync(string connectionString, CancellationToken cancellationToken)
+{
+    await using var conn = new MySqlConnection(connectionString);
+    await conn.OpenAsync(cancellationToken);
+
+    const string sql = """
+        SELECT Barcode, ImageUrl, Name, Brand, Quantity
+        FROM cellar
+        ORDER BY Name, Brand, id
+    """;
+
+    await using var cmd = new MySqlCommand(sql, conn);
+    await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+    var items = new List<CellarInventoryItem>();
+    var imageUrlOrdinal = reader.GetOrdinal("ImageUrl");
+    while (await reader.ReadAsync(cancellationToken))
+    {
+        items.Add(new CellarInventoryItem
+        {
+            Ean = reader.GetString("Barcode"),
+            ImageUrl = reader.IsDBNull(imageUrlOrdinal) ? null : reader.GetString("ImageUrl"),
+            ProductName = reader.GetString("Name"),
+            Brand = reader.GetString("Brand"),
+            Quantity = reader.GetInt32("Quantity")
+        });
+    }
+
+    return items;
+}
+
+static async Task<CellarInventoryItem?> GetCellarItemByEanAsync(
+    MySqlConnection conn,
+    MySqlTransaction transaction,
+    string ean,
+    CancellationToken cancellationToken)
+{
+    const string sql = """
+        SELECT Barcode, ImageUrl, Name, Brand, Quantity
+        FROM cellar
+        WHERE Barcode = @ean
+        LIMIT 1
+    """;
+
+    await using var cmd = new MySqlCommand(sql, conn, transaction);
+    cmd.Parameters.AddWithValue("@ean", ean);
+
+    await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+    if (!await reader.ReadAsync(cancellationToken))
+    {
+        return null;
+    }
+
+    var imageUrlOrdinal = reader.GetOrdinal("ImageUrl");
+    return new CellarInventoryItem
+    {
+        Ean = reader.GetString("Barcode"),
+        ImageUrl = reader.IsDBNull(imageUrlOrdinal) ? null : reader.GetString("ImageUrl"),
+        ProductName = reader.GetString("Name"),
+        Brand = reader.GetString("Brand"),
+        Quantity = reader.GetInt32("Quantity")
+    };
+}
+
+static async Task InsertCellarItemAsync(
+    MySqlConnection conn,
+    MySqlTransaction transaction,
+    CellarInventoryItem item,
+    CancellationToken cancellationToken)
+{
+    const string sql = """
+        INSERT INTO cellar (Barcode, ImageUrl, Name, Brand, Quantity)
+        VALUES (@ean, @imageUrl, @name, @brand, @quantity)
+    """;
+
+    await using var cmd = new MySqlCommand(sql, conn, transaction);
+    cmd.Parameters.AddWithValue("@ean", item.Ean);
+    cmd.Parameters.AddWithValue("@imageUrl", item.ImageUrl);
+    cmd.Parameters.AddWithValue("@name", item.ProductName);
+    cmd.Parameters.AddWithValue("@brand", item.Brand);
+    cmd.Parameters.AddWithValue("@quantity", item.Quantity);
+    await cmd.ExecuteNonQueryAsync(cancellationToken);
+}
+
+static async Task UpdateCellarQuantityAsync(
+    MySqlConnection conn,
+    MySqlTransaction transaction,
+    string ean,
+    int quantity,
+    CancellationToken cancellationToken)
+{
+    const string sql = """
+        UPDATE cellar
+        SET Quantity = @quantity
+        WHERE Barcode = @ean
+    """;
+
+    await using var cmd = new MySqlCommand(sql, conn, transaction);
+    cmd.Parameters.AddWithValue("@ean", ean);
+    cmd.Parameters.AddWithValue("@quantity", quantity);
+    await cmd.ExecuteNonQueryAsync(cancellationToken);
+}
